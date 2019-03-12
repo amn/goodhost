@@ -4,27 +4,21 @@
 #include <stdio.h>
 #include <windows.h>
 
-struct parse_command_line_result {
-	LPSTR log_file_path;
-	LPSTR target_command_line;
-};
-
-struct find_whitespace_result {
-	LPTSTR start;
-	LPTSTR end;
-};
+LPSTR* WINAPI CommandLineToArgvA(LPSTR lpCmdline, int* numargs);
 
 static FILE * log_file;
 
-static int find_whitespace(LPTSTR, struct find_whitespace_result *);
-static int parse_command_line(LPSTR, struct parse_command_line_result *);
+LPSTR load_subprocess_argv(LPSTR * argv, int argc);
 
 int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
-	struct parse_command_line_result args;
-	
-	if (parse_command_line(lpCmdLine, &args) != 0) {
-		MessageBox(NULL, "Error parsing command line arguments, aborting.", NULL, MB_ICONERROR);
+	LPSTR * argv;
+	int argc;
+
+	argv = CommandLineToArgvA(lpCmdLine, &argc);
+
+	if (argv == NULL) {
+		MessageBox(NULL, "Invalid command line.", NULL, MB_ICONERROR);
 		return -1;
 	}
 
@@ -33,7 +27,7 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 	sa.nLength = sizeof(sa);
 	sa.bInheritHandle = TRUE;
 
-	log_file = _fsopen(args.log_file_path, "a", _SH_DENYWR);
+	log_file = _fsopen(argv[0], "a", _SH_DENYWR);
 
 	if (log_file == NULL) {
 		MessageBox(NULL, "Error opening log file for writing, aborting.", NULL, MB_ICONERROR);
@@ -53,19 +47,6 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 
 	fprintf(log_file, "\nHello. This is Good Host, loaded from '%s' by user '%s'.\n", szModulePath, szUserName);
 
-	/*hLogFile = CreateFile(args.log_file_path, GENERIC_WRITE, FILE_SHARE_READ, &sa, OPEN_EXISTING, 0, NULL);
-	if (hLogFile == INVALID_HANDLE_VALUE) {
-		_RPTF0(_CRT_ERROR, "Error opening log file for writing.\n");
-		return -1;
-	}
-
-	const LARGE_INTEGER zero_large_offset = { 0 };
-	assert(SetFilePointerEx(hLogFile, zero_large_offset, NULL, FILE_END));
-
-	DWORD nWritten;*/
-
-	fprintf(log_file, "Creating child process '%s'. Observe its output below until its termination.\n", args.target_command_line);
-
 	STARTUPINFO si = { 0 };
 
 	si.cb = sizeof(si);
@@ -77,10 +58,15 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 
 	PROCESS_INFORMATION pi = { 0 };
 
+	LPSTR sp_argv = load_subprocess_argv(argv, argc);
+
+	fprintf(log_file, "Creating child process '%s'. Observe its output below until its termination.\n", sp_argv);
+
 	fflush(log_file);
 
-	if (!CreateProcess(NULL, args.target_command_line, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+	if (!CreateProcess(NULL, sp_argv, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
 		fprintf(log_file, "Error creating child process (%d).\n", GetLastError());
+		MessageBox(NULL, "Error creating child process.", NULL, MB_ICONERROR);
 		err = -3;
 	}
 
@@ -103,40 +89,40 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 
 	fclose(log_file);
 
+	LocalFree(argv);
+
+	free(sp_argv);
+
 	return err;
 }
 
-int parse_command_line(LPSTR lpCmdLine, struct parse_command_line_result * p_parse_command_line_result)
+LPSTR load_subprocess_argv(LPSTR * argv, int argc)
 {
-	struct find_whitespace_result ws;
+	const int skip = 1;
+	size_t l = 0;
 
-	p_parse_command_line_result->log_file_path = lpCmdLine;
-
-	if (find_whitespace(lpCmdLine, &ws) != 0) {
-		return -1;
+	for (int i = skip; i < argc; i++) {
+		l += strlen(argv[i]) + 2;
 	}
 
-	*(ws.start) = '\0';
+	char * p_buf = malloc(l + argc - 1 - skip + 1);
+	char * dst = p_buf;
 
-	if (*(ws.end) == '\0') {
-		return -2;
-	}
+	*dst = 0;
 
-	p_parse_command_line_result->target_command_line = ws.end;
-	
-	return 0;
-}
-
-int find_whitespace(LPTSTR s, struct find_whitespace_result * p_result)
-{
-	for (; *s != '\0'; s++) {
-		if (isspace(*s)) {
-			p_result->start = s;
-			s++;
-			for (; isspace(*s); s++);
-			p_result->end = s;
-			return 0;
+	if (argc) {
+		for (int i = skip; i < argc; i++) {
+			*dst++ = '\"';
+			for (char * src = argv[i]; *src; ) {
+				*dst++ = *src++;
+			}
+			*dst++ = '\"';
+			*dst++ = ' ';
 		}
+		*(dst - 1) = 0;
 	}
-	return -1;
-}	
+
+	assert(dst == p_buf + l + argc - 1 - skip + 1);
+
+	return p_buf;
+}
